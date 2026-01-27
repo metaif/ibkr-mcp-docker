@@ -7,14 +7,12 @@ A Model Context Protocol server that provides IBKR trading capabilities.
 import os
 import asyncio
 import logging
-import json
-from typing import Any, Dict, List, Optional
-from datetime import datetime, timedelta
+from typing import List, Optional
+from datetime import datetime
 
-import anyio
-from ib_async import IB, Stock, Option, Order, LimitOrder, MarketOrder, StopOrder
-import mcp.types as types
-from mcp.server.lowlevel import Server
+from pydantic import BaseModel, Field
+from ib_async import IB, Stock, LimitOrder, MarketOrder, StopOrder
+from fastmcp import FastMCP
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -28,6 +26,96 @@ IBKR_CLIENT_ID = int(os.getenv("IBKR_CLIENT_ID", "1"))
 # Global IB connection
 ib = IB()
 
+# Create FastMCP server
+mcp = FastMCP("IBKR Trading Server")
+
+
+# Pydantic Models for structured returns
+class AccountValue(BaseModel):
+    """Account value information"""
+    tag: str
+    value: str
+    currency: str
+    account: str
+
+
+class AccountSummary(BaseModel):
+    """Account summary with key financial metrics"""
+    net_liquidation: Optional[AccountValue] = None
+    cash_balance: Optional[AccountValue] = None
+    total_cash_value: Optional[AccountValue] = None
+    buying_power: Optional[AccountValue] = None
+    gross_position_value: Optional[AccountValue] = None
+
+
+class Position(BaseModel):
+    """Position information"""
+    account: str
+    symbol: str
+    sec_type: str = Field(description="Security type (STK, OPT, FUT, etc.)")
+    exchange: str
+    position: float = Field(description="Number of shares/contracts")
+    avg_cost: float = Field(description="Average cost per share")
+    market_price: float = Field(description="Current market price")
+    market_value: float = Field(description="Total market value")
+    unrealized_pnl: float = Field(description="Unrealized profit/loss")
+    realized_pnl: float = Field(description="Realized profit/loss")
+
+
+class OrderInfo(BaseModel):
+    """Order information"""
+    order_id: int
+    symbol: str
+    action: str = Field(description="BUY or SELL")
+    order_type: str = Field(description="Order type (LMT, MKT, STP, etc.)")
+    total_quantity: float
+    limit_price: Optional[float] = None
+    stop_price: Optional[float] = None
+    status: str = Field(description="Order status")
+    filled: float = Field(description="Filled quantity")
+    remaining: float = Field(description="Remaining quantity")
+    avg_fill_price: float = Field(description="Average fill price")
+
+
+class StockPrice(BaseModel):
+    """Real-time stock price information"""
+    symbol: str
+    bid: Optional[float] = None
+    ask: Optional[float] = None
+    last: Optional[float] = None
+    close: Optional[float] = None
+    volume: Optional[float] = None
+    timestamp: Optional[str] = None
+
+
+class HistoricalBar(BaseModel):
+    """Historical price bar"""
+    date: str
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: float
+
+
+class OptionChain(BaseModel):
+    """Option chain information"""
+    exchange: str
+    strikes: List[float]
+    expirations: List[str]
+    multiplier: str
+
+
+class OrderResult(BaseModel):
+    """Result of order placement"""
+    order_id: int
+    status: str
+    symbol: str
+    action: str
+    quantity: float
+    limit_price: Optional[float] = None
+    stop_price: Optional[float] = None
+
 
 async def ensure_connected():
     """Ensure IB connection is active."""
@@ -40,76 +128,93 @@ async def ensure_connected():
             raise
 
 
-async def get_account_summary() -> Dict[str, Any]:
-    """Get account summary including cash flow."""
+@mcp.tool()
+async def get_account_summary() -> AccountSummary:
+    """Get account summary including cash balance and net liquidation value"""
     await ensure_connected()
     
     account_values = ib.accountValues()
-    summary = {}
+    summary_dict = {}
     
     for av in account_values:
         if av.tag in ['NetLiquidation', 'CashBalance', 'TotalCashValue', 
                       'BuyingPower', 'GrossPositionValue']:
-            summary[av.tag] = {
-                'value': av.value,
-                'currency': av.currency,
-                'account': av.account
-            }
+            summary_dict[av.tag] = AccountValue(
+                tag=av.tag,
+                value=av.value,
+                currency=av.currency,
+                account=av.account
+            )
     
-    return summary
+    return AccountSummary(
+        net_liquidation=summary_dict.get('NetLiquidation'),
+        cash_balance=summary_dict.get('CashBalance'),
+        total_cash_value=summary_dict.get('TotalCashValue'),
+        buying_power=summary_dict.get('BuyingPower'),
+        gross_position_value=summary_dict.get('GrossPositionValue')
+    )
 
 
-async def get_positions() -> List[Dict[str, Any]]:
-    """Get all current positions."""
+@mcp.tool()
+async def get_positions() -> List[Position]:
+    """Get all current positions in the account"""
     await ensure_connected()
     
     positions = ib.positions()
     result = []
     
     for pos in positions:
-        result.append({
-            'account': pos.account,
-            'symbol': pos.contract.symbol,
-            'secType': pos.contract.secType,
-            'exchange': pos.contract.exchange,
-            'position': pos.position,
-            'avgCost': pos.avgCost,
-            'marketPrice': pos.marketPrice,
-            'marketValue': pos.marketValue,
-            'unrealizedPNL': pos.unrealizedPNL,
-            'realizedPNL': pos.realizedPNL
-        })
+        result.append(Position(
+            account=pos.account,
+            symbol=pos.contract.symbol,
+            sec_type=pos.contract.secType,
+            exchange=pos.contract.exchange,
+            position=pos.position,
+            avg_cost=pos.avgCost,
+            market_price=pos.marketPrice,
+            market_value=pos.marketValue,
+            unrealized_pnl=pos.unrealizedPNL,
+            realized_pnl=pos.realizedPNL
+        ))
     
     return result
 
 
-async def get_orders() -> List[Dict[str, Any]]:
-    """Get all orders."""
+@mcp.tool()
+async def get_orders() -> List[OrderInfo]:
+    """Get all orders (open and filled)"""
     await ensure_connected()
     
     trades = ib.trades()
     result = []
     
     for trade in trades:
-        result.append({
-            'orderId': trade.order.orderId,
-            'symbol': trade.contract.symbol,
-            'action': trade.order.action,
-            'orderType': trade.order.orderType,
-            'totalQuantity': trade.order.totalQuantity,
-            'lmtPrice': trade.order.lmtPrice,
-            'auxPrice': trade.order.auxPrice,
-            'status': trade.orderStatus.status,
-            'filled': trade.orderStatus.filled,
-            'remaining': trade.orderStatus.remaining,
-            'avgFillPrice': trade.orderStatus.avgFillPrice,
-        })
+        result.append(OrderInfo(
+            order_id=trade.order.orderId,
+            symbol=trade.contract.symbol,
+            action=trade.order.action,
+            order_type=trade.order.orderType,
+            total_quantity=trade.order.totalQuantity,
+            limit_price=trade.order.lmtPrice if trade.order.lmtPrice else None,
+            stop_price=trade.order.auxPrice if trade.order.auxPrice else None,
+            status=trade.orderStatus.status,
+            filled=trade.orderStatus.filled,
+            remaining=trade.orderStatus.remaining,
+            avg_fill_price=trade.orderStatus.avgFillPrice
+        ))
     
     return result
 
 
-async def get_stock_price(symbol: str, exchange: str = "SMART") -> Dict[str, Any]:
-    """Get real-time stock price."""
+@mcp.tool()
+async def get_stock_price(symbol: str, exchange: str = "SMART") -> StockPrice:
+    """
+    Get real-time stock price
+    
+    Args:
+        symbol: Stock symbol (e.g., AAPL, TSLA)
+        exchange: Exchange (default: SMART)
+    """
     await ensure_connected()
     
     contract = Stock(symbol, exchange, 'USD')
@@ -119,24 +224,33 @@ async def get_stock_price(symbol: str, exchange: str = "SMART") -> Dict[str, Any
     await asyncio.sleep(2)  # Wait for data
     ib.cancelMktData(contract)
     
-    return {
-        'symbol': symbol,
-        'bid': ticker.bid,
-        'ask': ticker.ask,
-        'last': ticker.last,
-        'close': ticker.close,
-        'volume': ticker.volume,
-        'time': str(ticker.time)
-    }
+    return StockPrice(
+        symbol=symbol,
+        bid=ticker.bid if ticker.bid else None,
+        ask=ticker.ask if ticker.ask else None,
+        last=ticker.last if ticker.last else None,
+        close=ticker.close if ticker.close else None,
+        volume=ticker.volume if ticker.volume else None,
+        timestamp=str(ticker.time) if ticker.time else None
+    )
 
 
+@mcp.tool()
 async def get_historical_data(
     symbol: str, 
     duration: str = "1 D",
     bar_size: str = "1 hour",
     exchange: str = "SMART"
-) -> List[Dict[str, Any]]:
-    """Get historical stock data."""
+) -> List[HistoricalBar]:
+    """
+    Get historical stock data
+    
+    Args:
+        symbol: Stock symbol
+        duration: Duration (e.g., '1 D', '1 W', '1 M')
+        bar_size: Bar size (e.g., '1 min', '1 hour', '1 day')
+        exchange: Exchange (default: SMART)
+    """
     await ensure_connected()
     
     contract = Stock(symbol, exchange, 'USD')
@@ -153,23 +267,27 @@ async def get_historical_data(
     
     result = []
     for bar in bars:
-        result.append({
-            'date': str(bar.date),
-            'open': bar.open,
-            'high': bar.high,
-            'low': bar.low,
-            'close': bar.close,
-            'volume': bar.volume
-        })
+        result.append(HistoricalBar(
+            date=str(bar.date),
+            open=bar.open,
+            high=bar.high,
+            low=bar.low,
+            close=bar.close,
+            volume=bar.volume
+        ))
     
     return result
 
 
-async def get_option_chain(
-    symbol: str,
-    exchange: str = "SMART"
-) -> List[Dict[str, Any]]:
-    """Get option chain for a stock."""
+@mcp.tool()
+async def get_option_chain(symbol: str, exchange: str = "SMART") -> List[OptionChain]:
+    """
+    Get option chain for a stock
+    
+    Args:
+        symbol: Stock symbol
+        exchange: Exchange (default: SMART)
+    """
     await ensure_connected()
     
     contract = Stock(symbol, exchange, 'USD')
@@ -182,24 +300,34 @@ async def get_option_chain(
     result = []
     if chains:
         for chain in chains:
-            result.append({
-                'exchange': chain.exchange,
-                'strikes': list(chain.strikes),
-                'expirations': [str(exp) for exp in chain.expirations],
-                'multiplier': chain.multiplier
-            })
+            result.append(OptionChain(
+                exchange=chain.exchange,
+                strikes=sorted(list(chain.strikes)),
+                expirations=sorted([str(exp) for exp in chain.expirations]),
+                multiplier=str(chain.multiplier)
+            ))
     
     return result
 
 
+@mcp.tool()
 async def place_limit_order(
     symbol: str,
     action: str,
     quantity: float,
     limit_price: float,
     exchange: str = "SMART"
-) -> Dict[str, Any]:
-    """Place a limit order."""
+) -> OrderResult:
+    """
+    Place a limit order
+    
+    Args:
+        symbol: Stock symbol
+        action: BUY or SELL
+        quantity: Number of shares
+        limit_price: Limit price
+        exchange: Exchange (default: SMART)
+    """
     await ensure_connected()
     
     contract = Stock(symbol, exchange, 'USD')
@@ -210,23 +338,32 @@ async def place_limit_order(
     
     await asyncio.sleep(1)  # Wait for order to be submitted
     
-    return {
-        'orderId': trade.order.orderId,
-        'status': trade.orderStatus.status,
-        'symbol': symbol,
-        'action': action,
-        'quantity': quantity,
-        'limitPrice': limit_price
-    }
+    return OrderResult(
+        order_id=trade.order.orderId,
+        status=trade.orderStatus.status,
+        symbol=symbol,
+        action=action,
+        quantity=quantity,
+        limit_price=limit_price
+    )
 
 
+@mcp.tool()
 async def place_market_order(
     symbol: str,
     action: str,
     quantity: float,
     exchange: str = "SMART"
-) -> Dict[str, Any]:
-    """Place a market order."""
+) -> OrderResult:
+    """
+    Place a market order
+    
+    Args:
+        symbol: Stock symbol
+        action: BUY or SELL
+        quantity: Number of shares
+        exchange: Exchange (default: SMART)
+    """
     await ensure_connected()
     
     contract = Stock(symbol, exchange, 'USD')
@@ -237,23 +374,33 @@ async def place_market_order(
     
     await asyncio.sleep(1)
     
-    return {
-        'orderId': trade.order.orderId,
-        'status': trade.orderStatus.status,
-        'symbol': symbol,
-        'action': action,
-        'quantity': quantity
-    }
+    return OrderResult(
+        order_id=trade.order.orderId,
+        status=trade.orderStatus.status,
+        symbol=symbol,
+        action=action,
+        quantity=quantity
+    )
 
 
+@mcp.tool()
 async def place_stop_order(
     symbol: str,
     action: str,
     quantity: float,
     stop_price: float,
     exchange: str = "SMART"
-) -> Dict[str, Any]:
-    """Place a stop order."""
+) -> OrderResult:
+    """
+    Place a stop (stop-loss) order
+    
+    Args:
+        symbol: Stock symbol
+        action: BUY or SELL
+        quantity: Number of shares
+        stop_price: Stop price
+        exchange: Exchange (default: SMART)
+    """
     await ensure_connected()
     
     contract = Stock(symbol, exchange, 'USD')
@@ -264,293 +411,11 @@ async def place_stop_order(
     
     await asyncio.sleep(1)
     
-    return {
-        'orderId': trade.order.orderId,
-        'status': trade.orderStatus.status,
-        'symbol': symbol,
-        'action': action,
-        'quantity': quantity,
-        'stopPrice': stop_price
-    }
-
-
-# Create MCP server
-app = Server("ibkr-mcp-server")
-
-
-@app.list_tools()
-async def list_tools() -> list[types.Tool]:
-    """List available tools."""
-    return [
-        types.Tool(
-            name="get_account_summary",
-            description="Get account summary including cash balance and net liquidation value",
-            inputSchema={
-                "type": "object",
-                "properties": {},
-                "required": []
-            }
-        ),
-        types.Tool(
-            name="get_positions",
-            description="Get all current positions in the account",
-            inputSchema={
-                "type": "object",
-                "properties": {},
-                "required": []
-            }
-        ),
-        types.Tool(
-            name="get_orders",
-            description="Get all orders (open and filled)",
-            inputSchema={
-                "type": "object",
-                "properties": {},
-                "required": []
-            }
-        ),
-        types.Tool(
-            name="get_stock_price",
-            description="Get real-time stock price",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "symbol": {
-                        "type": "string",
-                        "description": "Stock symbol (e.g., AAPL, TSLA)"
-                    },
-                    "exchange": {
-                        "type": "string",
-                        "description": "Exchange (default: SMART)",
-                        "default": "SMART"
-                    }
-                },
-                "required": ["symbol"]
-            }
-        ),
-        types.Tool(
-            name="get_historical_data",
-            description="Get historical stock data",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "symbol": {
-                        "type": "string",
-                        "description": "Stock symbol"
-                    },
-                    "duration": {
-                        "type": "string",
-                        "description": "Duration (e.g., '1 D', '1 W', '1 M')",
-                        "default": "1 D"
-                    },
-                    "bar_size": {
-                        "type": "string",
-                        "description": "Bar size (e.g., '1 min', '1 hour', '1 day')",
-                        "default": "1 hour"
-                    },
-                    "exchange": {
-                        "type": "string",
-                        "description": "Exchange (default: SMART)",
-                        "default": "SMART"
-                    }
-                },
-                "required": ["symbol"]
-            }
-        ),
-        types.Tool(
-            name="get_option_chain",
-            description="Get option chain for a stock",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "symbol": {
-                        "type": "string",
-                        "description": "Stock symbol"
-                    },
-                    "exchange": {
-                        "type": "string",
-                        "description": "Exchange (default: SMART)",
-                        "default": "SMART"
-                    }
-                },
-                "required": ["symbol"]
-            }
-        ),
-        types.Tool(
-            name="place_limit_order",
-            description="Place a limit order",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "symbol": {
-                        "type": "string",
-                        "description": "Stock symbol"
-                    },
-                    "action": {
-                        "type": "string",
-                        "description": "BUY or SELL",
-                        "enum": ["BUY", "SELL"]
-                    },
-                    "quantity": {
-                        "type": "number",
-                        "description": "Number of shares"
-                    },
-                    "limit_price": {
-                        "type": "number",
-                        "description": "Limit price"
-                    },
-                    "exchange": {
-                        "type": "string",
-                        "description": "Exchange (default: SMART)",
-                        "default": "SMART"
-                    }
-                },
-                "required": ["symbol", "action", "quantity", "limit_price"]
-            }
-        ),
-        types.Tool(
-            name="place_market_order",
-            description="Place a market order",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "symbol": {
-                        "type": "string",
-                        "description": "Stock symbol"
-                    },
-                    "action": {
-                        "type": "string",
-                        "description": "BUY or SELL",
-                        "enum": ["BUY", "SELL"]
-                    },
-                    "quantity": {
-                        "type": "number",
-                        "description": "Number of shares"
-                    },
-                    "exchange": {
-                        "type": "string",
-                        "description": "Exchange (default: SMART)",
-                        "default": "SMART"
-                    }
-                },
-                "required": ["symbol", "action", "quantity"]
-            }
-        ),
-        types.Tool(
-            name="place_stop_order",
-            description="Place a stop (stop-loss) order",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "symbol": {
-                        "type": "string",
-                        "description": "Stock symbol"
-                    },
-                    "action": {
-                        "type": "string",
-                        "description": "BUY or SELL",
-                        "enum": ["BUY", "SELL"]
-                    },
-                    "quantity": {
-                        "type": "number",
-                        "description": "Number of shares"
-                    },
-                    "stop_price": {
-                        "type": "number",
-                        "description": "Stop price"
-                    },
-                    "exchange": {
-                        "type": "string",
-                        "description": "Exchange (default: SMART)",
-                        "default": "SMART"
-                    }
-                },
-                "required": ["symbol", "action", "quantity", "stop_price"]
-            }
-        ),
-    ]
-
-
-@app.call_tool()
-async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.ContentBlock]:
-    """Handle tool calls."""
-    try:
-        if name == "get_account_summary":
-            result = await get_account_summary()
-        elif name == "get_positions":
-            result = await get_positions()
-        elif name == "get_orders":
-            result = await get_orders()
-        elif name == "get_stock_price":
-            result = await get_stock_price(
-                arguments["symbol"],
-                arguments.get("exchange", "SMART")
-            )
-        elif name == "get_historical_data":
-            result = await get_historical_data(
-                arguments["symbol"],
-                arguments.get("duration", "1 D"),
-                arguments.get("bar_size", "1 hour"),
-                arguments.get("exchange", "SMART")
-            )
-        elif name == "get_option_chain":
-            result = await get_option_chain(
-                arguments["symbol"],
-                arguments.get("exchange", "SMART")
-            )
-        elif name == "place_limit_order":
-            result = await place_limit_order(
-                arguments["symbol"],
-                arguments["action"],
-                arguments["quantity"],
-                arguments["limit_price"],
-                arguments.get("exchange", "SMART")
-            )
-        elif name == "place_market_order":
-            result = await place_market_order(
-                arguments["symbol"],
-                arguments["action"],
-                arguments["quantity"],
-                arguments.get("exchange", "SMART")
-            )
-        elif name == "place_stop_order":
-            result = await place_stop_order(
-                arguments["symbol"],
-                arguments["action"],
-                arguments["quantity"],
-                arguments["stop_price"],
-                arguments.get("exchange", "SMART")
-            )
-        else:
-            raise ValueError(f"Unknown tool: {name}")
-        
-        return [types.TextContent(
-            type="text",
-            text=json.dumps(result, indent=2)
-        )]
-    except Exception as e:
-        logger.error(f"Error in tool {name}: {e}")
-        return [types.TextContent(
-            type="text",
-            text=f"Error: {str(e)}"
-        )]
-
-
-def main() -> int:
-    """Main entry point."""
-    from mcp.server.stdio import stdio_server
-    
-    async def arun():
-        async with stdio_server() as streams:
-            await app.run(
-                streams[0],
-                streams[1],
-                app.create_initialization_options()
-            )
-    
-    anyio.run(arun)
-    return 0
-
-if __name__ == "__main__":
-    import sys
-    sys.exit(main())
+    return OrderResult(
+        order_id=trade.order.orderId,
+        status=trade.orderStatus.status,
+        symbol=symbol,
+        action=action,
+        quantity=quantity,
+        stop_price=stop_price
+    )

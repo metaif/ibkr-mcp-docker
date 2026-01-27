@@ -30,7 +30,12 @@ This MCP server provides the following capabilities:
 This project integrates two services:
 
 1. **IB Gateway** - Uses [ib-gateway-docker](https://github.com/gnzsnz/ib-gateway-docker) to provide the Interactive Brokers Gateway
-2. **MCP Server** - A Python-based MCP server using [ib_async](https://ib-api-reloaded.github.io/ib_async/readme.html) to communicate with the gateway
+2. **MCP Server** - A Python-based MCP server built with [FastMCP](https://github.com/jlowin/fastmcp) and [ib_async](https://ib-api-reloaded.github.io/ib_async/readme.html)
+
+**Key Features:**
+- **FastMCP Integration**: Uses decorator-based tool registration for clean, Pythonic code
+- **Pydantic Models**: All responses are typed using Pydantic models for structured, validated data
+- **Type Safety**: Full type hints and automatic schema generation from function signatures
 
 Both services are configured through a single `.env` file for simplicity.
 
@@ -118,23 +123,48 @@ docker exec -i ibkr-mcp-server python server.py
 
 ### Available Tools
 
-The MCP server provides the following tools:
+The MCP server provides the following tools with structured Pydantic model responses:
 
-1. **get_account_summary** - Get account balance and cash flow information
-2. **get_positions** - Get all current positions
-3. **get_orders** - Get all orders (open and filled)
-4. **get_stock_price** - Get real-time stock price
+1. **get_account_summary** → `AccountSummary`
+   - Get account balance and cash flow information
+   - Returns structured data with net_liquidation, cash_balance, total_cash_value, buying_power, gross_position_value
+
+2. **get_positions** → `List[Position]`
+   - Get all current positions
+   - Each position includes symbol, quantity, avg_cost, market_price, unrealized_pnl, realized_pnl
+
+3. **get_orders** → `List[OrderInfo]`
+   - Get all orders (open and filled)
+   - Includes order_id, symbol, action, order_type, status, filled quantity, avg_fill_price
+
+4. **get_stock_price** → `StockPrice`
+   - Get real-time stock price
    - Parameters: `symbol`, `exchange` (optional, default: "SMART")
-5. **get_historical_data** - Get historical stock data
+   - Returns bid, ask, last, close, volume, timestamp
+
+5. **get_historical_data** → `List[HistoricalBar]`
+   - Get historical stock data
    - Parameters: `symbol`, `duration` (default: "1 D"), `bar_size` (default: "1 hour"), `exchange` (optional)
-6. **get_option_chain** - Get option chain for a stock
+   - Returns OHLCV data for each bar
+
+6. **get_option_chain** → `List[OptionChain]`
+   - Get option chain for a stock
    - Parameters: `symbol`, `exchange` (optional)
-7. **place_limit_order** - Place a limit order
+   - Returns available strikes, expirations, and multipliers
+
+7. **place_limit_order** → `OrderResult`
+   - Place a limit order
    - Parameters: `symbol`, `action` (BUY/SELL), `quantity`, `limit_price`, `exchange` (optional)
-8. **place_market_order** - Place a market order
+
+8. **place_market_order** → `OrderResult`
+   - Place a market order
    - Parameters: `symbol`, `action` (BUY/SELL), `quantity`, `exchange` (optional)
-9. **place_stop_order** - Place a stop-loss order
+
+9. **place_stop_order** → `OrderResult`
+   - Place a stop-loss order
    - Parameters: `symbol`, `action` (BUY/SELL), `quantity`, `stop_price`, `exchange` (optional)
+
+All tools use **Pydantic models** for type-safe, validated responses with clear field descriptions.
 
 ### Stopping the Services
 
@@ -217,7 +247,9 @@ MIT
 
 ## References
 
+- [FastMCP](https://github.com/jlowin/fastmcp) - Modern Python framework for building MCP servers
 - [IB Gateway Docker](https://github.com/gnzsnz/ib-gateway-docker)
 - [ib_async Documentation](https://ib-api-reloaded.github.io/ib_async/readme.html)
+- [Pydantic](https://docs.pydantic.dev/) - Data validation using Python type hints
 - [Model Context Protocol](https://modelcontextprotocol.io/)
 - [Interactive Brokers API](https://www.interactivebrokers.com/en/index.php?f=5041)

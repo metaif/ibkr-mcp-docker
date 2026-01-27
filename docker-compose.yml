@@ -31,8 +31,10 @@ services:
       - IBKR_HOST=ib-gateway
       - IBKR_GATEWAY_PORT=${IBKR_GATEWAY_PORT:-4002}
       - IBKR_CLIENT_ID=1
-    stdin_open: true
-    tty: true
+      - SERVER_PORT=${SERVER_PORT:-8080}
+      - READONLY=${READONLY:-false}
+    ports:
+      - "${SERVER_PORT:-8080}:${SERVER_PORT:-8080}"  # HTTP/SSE port
     networks:
       - ibkr-network
 

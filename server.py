@@ -9,6 +9,7 @@ import asyncio
 import logging
 from typing import List, Optional
 from datetime import datetime
+from contextlib import asynccontextmanager
 
 from pydantic import BaseModel, Field
 from ib_async import IB, Stock, LimitOrder, MarketOrder, StopOrder
@@ -29,8 +30,9 @@ READONLY = os.getenv("READONLY", "false").lower() in ("true", "1", "yes")
 # Server configuration
 SERVER_PORT = int(os.getenv("SERVER_PORT", "8080"))
 
-# Global IB connection
-ib = IB()
+# Global IB connection - will be initialized on startup
+ib: Optional[IB] = None
+_connection_lock = asyncio.Lock()
 
 # Create FastMCP server
 mcp = FastMCP("IBKR Trading Server")
@@ -125,21 +127,30 @@ class OrderResult(BaseModel):
 
 async def ensure_connected():
     """Ensure IB connection is active."""
-    if not ib.isConnected():
-        try:
-            await ib.connectAsync(IBKR_HOST, IBKR_PORT, clientId=IBKR_CLIENT_ID)
-            logger.info(f"Connected to IB Gateway at {IBKR_HOST}:{IBKR_PORT}")
-        except Exception as e:
-            logger.error(f"Failed to connect to IB Gateway: {e}")
-            raise
+    global ib
+    
+    async with _connection_lock:
+        if ib is None:
+            ib = IB()
+        
+        if not ib.isConnected():
+            try:
+                logger.info(f"Connecting to IB Gateway at {IBKR_HOST}:{IBKR_PORT}")
+                await ib.connectAsync(IBKR_HOST, IBKR_PORT, clientId=IBKR_CLIENT_ID, timeout=20)
+                logger.info(f"Connected to IB Gateway at {IBKR_HOST}:{IBKR_PORT}")
+            except Exception as e:
+                logger.error(f"Failed to connect to IB Gateway: {e}")
+                raise
+    
+    return ib
 
 
 @mcp.tool()
 async def get_account_summary() -> AccountSummary:
     """Get account summary including cash balance and net liquidation value"""
-    await ensure_connected()
+    ib_conn = await ensure_connected()
     
-    account_values = ib.accountValues()
+    account_values = ib_conn.accountValues()
     summary_dict = {}
     
     for av in account_values:
@@ -164,9 +175,9 @@ async def get_account_summary() -> AccountSummary:
 @mcp.tool()
 async def get_positions() -> List[Position]:
     """Get all current positions in the account"""
-    await ensure_connected()
+    ib_conn = await ensure_connected()
     
-    positions = ib.positions()
+    positions = ib_conn.positions()
     result = []
     
     for pos in positions:
@@ -189,9 +200,9 @@ async def get_positions() -> List[Position]:
 @mcp.tool()
 async def get_orders() -> List[OrderInfo]:
     """Get all orders (open and filled)"""
-    await ensure_connected()
+    ib_conn = await ensure_connected()
     
-    trades = ib.trades()
+    trades = ib_conn.trades()
     result = []
     
     for trade in trades:
@@ -221,14 +232,14 @@ async def get_stock_price(symbol: str, exchange: str = "SMART") -> StockPrice:
         symbol: Stock symbol (e.g., AAPL, TSLA)
         exchange: Exchange (default: SMART)
     """
-    await ensure_connected()
+    ib_conn = await ensure_connected()
     
     contract = Stock(symbol, exchange, 'USD')
-    ib.qualifyContracts(contract)
+    ib_conn.qualifyContracts(contract)
     
-    ticker = ib.reqMktData(contract)
+    ticker = ib_conn.reqMktData(contract)
     await asyncio.sleep(2)  # Wait for data
-    ib.cancelMktData(contract)
+    ib_conn.cancelMktData(contract)
     
     return StockPrice(
         symbol=symbol,
@@ -257,12 +268,12 @@ async def get_historical_data(
         bar_size: Bar size (e.g., '1 min', '1 hour', '1 day')
         exchange: Exchange (default: SMART)
     """
-    await ensure_connected()
+    ib_conn = await ensure_connected()
     
     contract = Stock(symbol, exchange, 'USD')
-    ib.qualifyContracts(contract)
+    ib_conn.qualifyContracts(contract)
     
-    bars = ib.reqHistoricalData(
+    bars = ib_conn.reqHistoricalData(
         contract,
         endDateTime='',
         durationStr=duration,
@@ -294,12 +305,12 @@ async def get_option_chain(symbol: str, exchange: str = "SMART") -> List[OptionC
         symbol: Stock symbol
         exchange: Exchange (default: SMART)
     """
-    await ensure_connected()
+    ib_conn = await ensure_connected()
     
     contract = Stock(symbol, exchange, 'USD')
-    ib.qualifyContracts(contract)
+    ib_conn.qualifyContracts(contract)
     
-    chains = ib.reqSecDefOptParams(
+    chains = ib_conn.reqSecDefOptParams(
         contract.symbol, '', contract.secType, contract.conId
     )
     
@@ -339,13 +350,13 @@ async def place_limit_order(
     if READONLY:
         raise ValueError("Order placement is disabled in READONLY mode")
     
-    await ensure_connected()
+    ib_conn = await ensure_connected()
     
     contract = Stock(symbol, exchange, 'USD')
-    ib.qualifyContracts(contract)
+    ib_conn.qualifyContracts(contract)
     
     order = LimitOrder(action, quantity, limit_price)
-    trade = ib.placeOrder(contract, order)
+    trade = ib_conn.placeOrder(contract, order)
     
     await asyncio.sleep(1)  # Wait for order to be submitted
     
@@ -380,13 +391,13 @@ async def place_market_order(
     if READONLY:
         raise ValueError("Order placement is disabled in READONLY mode")
     
-    await ensure_connected()
+    ib_conn = await ensure_connected()
     
     contract = Stock(symbol, exchange, 'USD')
-    ib.qualifyContracts(contract)
+    ib_conn.qualifyContracts(contract)
     
     order = MarketOrder(action, quantity)
-    trade = ib.placeOrder(contract, order)
+    trade = ib_conn.placeOrder(contract, order)
     
     await asyncio.sleep(1)
     
@@ -422,13 +433,13 @@ async def place_stop_order(
     if READONLY:
         raise ValueError("Order placement is disabled in READONLY mode")
     
-    await ensure_connected()
+    ib_conn = await ensure_connected()
     
     contract = Stock(symbol, exchange, 'USD')
-    ib.qualifyContracts(contract)
+    ib_conn.qualifyContracts(contract)
     
     order = StopOrder(action, quantity, stop_price)
-    trade = ib.placeOrder(contract, order)
+    trade = ib_conn.placeOrder(contract, order)
     
     await asyncio.sleep(1)
     

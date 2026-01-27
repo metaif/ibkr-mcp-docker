@@ -7,12 +7,14 @@ A Model Context Protocol server that provides IBKR trading capabilities.
 import os
 import asyncio
 import logging
+import json
 from typing import Any, Dict, List, Optional
 from datetime import datetime, timedelta
 
+import anyio
 from ib_async import IB, Stock, Option, Order, LimitOrder, MarketOrder, StopOrder
-from mcp.server import Server
-from mcp.types import Tool, TextContent, ImageContent, EmbeddedResource
+import mcp.types as types
+from mcp.server.lowlevel import Server
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -277,10 +279,10 @@ app = Server("ibkr-mcp-server")
 
 
 @app.list_tools()
-async def list_tools() -> List[Tool]:
+async def list_tools() -> list[types.Tool]:
     """List available tools."""
     return [
-        Tool(
+        types.Tool(
             name="get_account_summary",
             description="Get account summary including cash balance and net liquidation value",
             inputSchema={
@@ -289,7 +291,7 @@ async def list_tools() -> List[Tool]:
                 "required": []
             }
         ),
-        Tool(
+        types.Tool(
             name="get_positions",
             description="Get all current positions in the account",
             inputSchema={
@@ -298,7 +300,7 @@ async def list_tools() -> List[Tool]:
                 "required": []
             }
         ),
-        Tool(
+        types.Tool(
             name="get_orders",
             description="Get all orders (open and filled)",
             inputSchema={
@@ -307,7 +309,7 @@ async def list_tools() -> List[Tool]:
                 "required": []
             }
         ),
-        Tool(
+        types.Tool(
             name="get_stock_price",
             description="Get real-time stock price",
             inputSchema={
@@ -326,7 +328,7 @@ async def list_tools() -> List[Tool]:
                 "required": ["symbol"]
             }
         ),
-        Tool(
+        types.Tool(
             name="get_historical_data",
             description="Get historical stock data",
             inputSchema={
@@ -355,7 +357,7 @@ async def list_tools() -> List[Tool]:
                 "required": ["symbol"]
             }
         ),
-        Tool(
+        types.Tool(
             name="get_option_chain",
             description="Get option chain for a stock",
             inputSchema={
@@ -374,7 +376,7 @@ async def list_tools() -> List[Tool]:
                 "required": ["symbol"]
             }
         ),
-        Tool(
+        types.Tool(
             name="place_limit_order",
             description="Place a limit order",
             inputSchema={
@@ -406,7 +408,7 @@ async def list_tools() -> List[Tool]:
                 "required": ["symbol", "action", "quantity", "limit_price"]
             }
         ),
-        Tool(
+        types.Tool(
             name="place_market_order",
             description="Place a market order",
             inputSchema={
@@ -434,7 +436,7 @@ async def list_tools() -> List[Tool]:
                 "required": ["symbol", "action", "quantity"]
             }
         ),
-        Tool(
+        types.Tool(
             name="place_stop_order",
             description="Place a stop (stop-loss) order",
             inputSchema={
@@ -470,7 +472,7 @@ async def list_tools() -> List[Tool]:
 
 
 @app.call_tool()
-async def call_tool(name: str, arguments: Any) -> List[TextContent]:
+async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.ContentBlock]:
     """Handle tool calls."""
     try:
         if name == "get_account_summary":
@@ -522,30 +524,33 @@ async def call_tool(name: str, arguments: Any) -> List[TextContent]:
         else:
             raise ValueError(f"Unknown tool: {name}")
         
-        import json
-        return [TextContent(
+        return [types.TextContent(
             type="text",
             text=json.dumps(result, indent=2)
         )]
     except Exception as e:
         logger.error(f"Error in tool {name}: {e}")
-        return [TextContent(
+        return [types.TextContent(
             type="text",
             text=f"Error: {str(e)}"
         )]
 
 
-async def main():
+def main() -> int:
     """Main entry point."""
     from mcp.server.stdio import stdio_server
     
-    async with stdio_server() as (read_stream, write_stream):
-        await app.run(
-            read_stream,
-            write_stream,
-            app.create_initialization_options()
-        )
-
+    async def arun():
+        async with stdio_server() as streams:
+            await app.run(
+                streams[0],
+                streams[1],
+                app.create_initialization_options()
+            )
+    
+    anyio.run(arun)
+    return 0
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    import sys
+    sys.exit(main())

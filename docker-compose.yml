@@ -7,8 +7,10 @@ services:
     restart: unless-stopped
     environment:
       - TRADING_MODE=${IBKR_TRADING_MODE:-paper}
-      - TWSUSERID=${IBKR_USERID}
-      - TWSPASSWORD=${IBKR_PASSWORD}
+      - TWS_USERID=${IBKR_USERID}
+      - TWS_PASSWORD=${IBKR_PASSWORD}
+      - TWS_USERID_PAPER=${IBKR_USERID_PAPER}
+      - TWS_PASSWORD_PAPER=${IBKR_PASSWORD_PAPER}
       - VNC_SERVER_PASSWORD=${VNC_PASSWORD:-}
       - TWOFA_TIMEOUT_ACTION=restart
     ports:

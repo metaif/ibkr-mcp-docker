@@ -444,5 +444,5 @@ async def place_stop_order(
 
 if __name__ == "__main__":
     logger.info(f"Starting IBKR MCP Server in {'READONLY' if READONLY else 'READ/WRITE'} mode")
-    logger.info(f"HTTP Server on http://127.0.0.1:{SERVER_PORT}/mcp")
-    mcp.run(transport="sse", host="127.0.0.1", port=SERVER_PORT, path="/mcp")
+    mcp.run(transport="http", host="0.0.0.0", port=SERVER_PORT)
+

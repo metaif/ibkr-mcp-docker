@@ -195,8 +195,8 @@ async def get_orders() -> List[OrderInfo]:
             action=trade.order.action,
             order_type=trade.order.orderType,
             total_quantity=trade.order.totalQuantity,
-            limit_price=trade.order.lmtPrice if trade.order.lmtPrice else None,
-            stop_price=trade.order.auxPrice if trade.order.auxPrice else None,
+            limit_price=trade.order.lmtPrice or None,
+            stop_price=trade.order.auxPrice or None,
             status=trade.orderStatus.status,
             filled=trade.orderStatus.filled,
             remaining=trade.orderStatus.remaining,
@@ -226,11 +226,11 @@ async def get_stock_price(symbol: str, exchange: str = "SMART") -> StockPrice:
     
     return StockPrice(
         symbol=symbol,
-        bid=ticker.bid if ticker.bid else None,
-        ask=ticker.ask if ticker.ask else None,
-        last=ticker.last if ticker.last else None,
-        close=ticker.close if ticker.close else None,
-        volume=ticker.volume if ticker.volume else None,
+        bid=ticker.bid or None,
+        ask=ticker.ask or None,
+        last=ticker.last or None,
+        close=ticker.close or None,
+        volume=ticker.volume or None,
         timestamp=str(ticker.time) if ticker.time else None
     )
 
@@ -419,3 +419,7 @@ async def place_stop_order(
         quantity=quantity,
         stop_price=stop_price
     )
+
+
+if __name__ == "__main__":
+    mcp.run()

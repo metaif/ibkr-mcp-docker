@@ -1,0 +1,42 @@
+version: '3.8'
+
+services:
+  ib-gateway:
+    image: ghcr.io/gnzsnz/ib-gateway:stable
+    container_name: ib-gateway
+    restart: unless-stopped
+    environment:
+      - TRADING_MODE=${IBKR_TRADING_MODE:-paper}
+      - TWSUSERID=${IBKR_USERID}
+      - TWSPASSWORD=${IBKR_PASSWORD}
+      - VNC_SERVER_PASSWORD=${VNC_PASSWORD:-}
+      - TWOFA_TIMEOUT_ACTION=restart
+    ports:
+      - "${IBKR_GATEWAY_PORT:-4002}:4002"
+      - "5900:5900"  # VNC port for monitoring
+    volumes:
+      - ib-gateway-data:/home/ibgateway
+    networks:
+      - ibkr-network
+
+  mcp-server:
+    build: .
+    container_name: ibkr-mcp-server
+    restart: unless-stopped
+    depends_on:
+      - ib-gateway
+    environment:
+      - IBKR_HOST=ib-gateway
+      - IBKR_GATEWAY_PORT=${IBKR_GATEWAY_PORT:-4002}
+      - IBKR_CLIENT_ID=1
+    stdin_open: true
+    tty: true
+    networks:
+      - ibkr-network
+
+volumes:
+  ib-gateway-data:
+
+networks:
+  ibkr-network:
+    driver: bridge

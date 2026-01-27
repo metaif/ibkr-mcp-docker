@@ -36,6 +36,8 @@ This project integrates two services:
 - **FastMCP Integration**: Uses decorator-based tool registration for clean, Pythonic code
 - **Pydantic Models**: All responses are typed using Pydantic models for structured, validated data
 - **Type Safety**: Full type hints and automatic schema generation from function signatures
+- **HTTP/SSE Transport**: Exposes MCP server via HTTP at `http://127.0.0.1:8080/mcp`
+- **Read-Only Mode**: Optional READONLY mode to disable order placement, modification, and cancellation
 
 Both services are configured through a single `.env` file for simplicity.
 
@@ -66,9 +68,39 @@ IBKR_PASSWORD=your_password
 IBKR_TRADING_MODE=paper  # or 'live' for live trading
 IBKR_GATEWAY_PORT=4002
 
+# MCP Server Configuration
+SERVER_PORT=8080  # MCP server will be available at http://127.0.0.1:8080/mcp
+
+# Read-Only Mode (optional)
+READONLY=false  # Set to 'true' to disable order operations
+
 # Optional: VNC password for monitoring the gateway
 VNC_PASSWORD=your_vnc_password
 ```
+
+## Configuration
+
+### MCP Server Endpoint
+
+The MCP server is exposed via HTTP/SSE at:
+```
+http://127.0.0.1:8080/mcp
+```
+
+You can change the port by setting `SERVER_PORT` in your `.env` file.
+
+### Read-Only Mode
+
+Enable read-only mode to prevent order placement, modification, and cancellation:
+
+```bash
+READONLY=true
+```
+
+When enabled:
+- All query operations (positions, orders, prices, etc.) work normally
+- Order placement tools (`place_limit_order`, `place_market_order`, `place_stop_order`) will raise an error
+- Useful for monitoring and analysis without trading risk
 
 ## Usage
 
@@ -83,7 +115,18 @@ docker-compose up -d
 This will:
 - Start the IB Gateway container and connect to IBKR
 - Start the MCP server container
-- Make the MCP server available for connections
+- Expose the MCP server at `http://127.0.0.1:8080/mcp`
+
+### Using the MCP Server
+
+The MCP server is accessible via HTTP/SSE at:
+
+```bash
+# Access the MCP endpoint
+curl http://localhost:8080/mcp
+```
+
+The endpoint is compatible with HTTP-based MCP clients and can be integrated into your applications.
 
 ### Monitoring
 
@@ -105,20 +148,6 @@ docker-compose logs -f mcp-server
 
 # Just the IB Gateway
 docker-compose logs -f ib-gateway
-```
-
-### Using the MCP Server
-
-The MCP server runs in stdio mode and can be integrated with any MCP client. Configure your MCP client to use:
-
-```bash
-docker-compose exec mcp-server python server.py
-```
-
-Or run it directly:
-
-```bash
-docker exec -i ibkr-mcp-server python server.py
 ```
 
 ### Available Tools
@@ -155,14 +184,17 @@ The MCP server provides the following tools with structured Pydantic model respo
 7. **place_limit_order** → `OrderResult`
    - Place a limit order
    - Parameters: `symbol`, `action` (BUY/SELL), `quantity`, `limit_price`, `exchange` (optional)
+   - **Note**: Disabled when READONLY mode is enabled
 
 8. **place_market_order** → `OrderResult`
    - Place a market order
    - Parameters: `symbol`, `action` (BUY/SELL), `quantity`, `exchange` (optional)
+   - **Note**: Disabled when READONLY mode is enabled
 
 9. **place_stop_order** → `OrderResult`
    - Place a stop-loss order
    - Parameters: `symbol`, `action` (BUY/SELL), `quantity`, `stop_price`, `exchange` (optional)
+   - **Note**: Disabled when READONLY mode is enabled
 
 All tools use **Pydantic models** for type-safe, validated responses with clear field descriptions.
 

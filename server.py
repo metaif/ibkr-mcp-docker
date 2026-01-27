@@ -23,6 +23,12 @@ IBKR_HOST = os.getenv("IBKR_HOST", "ib-gateway")
 IBKR_PORT = int(os.getenv("IBKR_GATEWAY_PORT", "4002"))
 IBKR_CLIENT_ID = int(os.getenv("IBKR_CLIENT_ID", "1"))
 
+# Read-only mode - disables order placement, modification, and cancellation
+READONLY = os.getenv("READONLY", "false").lower() in ("true", "1", "yes")
+
+# Server configuration
+SERVER_PORT = int(os.getenv("SERVER_PORT", "8080"))
+
 # Global IB connection
 ib = IB()
 
@@ -327,7 +333,12 @@ async def place_limit_order(
         quantity: Number of shares
         limit_price: Limit price
         exchange: Exchange (default: SMART)
+    
+    Note: This tool is disabled when READONLY mode is enabled
     """
+    if READONLY:
+        raise ValueError("Order placement is disabled in READONLY mode")
+    
     await ensure_connected()
     
     contract = Stock(symbol, exchange, 'USD')
@@ -363,7 +374,12 @@ async def place_market_order(
         action: BUY or SELL
         quantity: Number of shares
         exchange: Exchange (default: SMART)
+    
+    Note: This tool is disabled when READONLY mode is enabled
     """
+    if READONLY:
+        raise ValueError("Order placement is disabled in READONLY mode")
+    
     await ensure_connected()
     
     contract = Stock(symbol, exchange, 'USD')
@@ -400,7 +416,12 @@ async def place_stop_order(
         quantity: Number of shares
         stop_price: Stop price
         exchange: Exchange (default: SMART)
+    
+    Note: This tool is disabled when READONLY mode is enabled
     """
+    if READONLY:
+        raise ValueError("Order placement is disabled in READONLY mode")
+    
     await ensure_connected()
     
     contract = Stock(symbol, exchange, 'USD')
@@ -422,4 +443,6 @@ async def place_stop_order(
 
 
 if __name__ == "__main__":
-    mcp.run()
+    logger.info(f"Starting IBKR MCP Server in {'READONLY' if READONLY else 'READ/WRITE'} mode")
+    logger.info(f"HTTP Server on http://127.0.0.1:{SERVER_PORT}/mcp")
+    mcp.run(transport="sse", host="127.0.0.1", port=SERVER_PORT, path="/mcp")

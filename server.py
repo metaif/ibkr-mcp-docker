@@ -7,8 +7,7 @@ A Model Context Protocol server that provides IBKR trading capabilities.
 import os
 import asyncio
 import logging
-from typing import List, Optional, Callable
-from enum import Enum
+from typing import List, Optional
 
 from pydantic import BaseModel, Field
 from ib_async import IB, Stock, LimitOrder, MarketOrder, StopOrder, Order, Contract
@@ -212,16 +211,16 @@ async def place_order_internal(symbol: str, action: str, quantity: float,
     )
 
 
-def safe_float(value, default=None) -> Optional[float]:
-    """Safely convert value to float, handling None and invalid values."""
-    if value is None or (isinstance(value, (int, float)) and value <= 0):
+def safe_float(value, default: Optional[float] = None) -> Optional[float]:
+    """Safely convert value to float, handling None and zero/negative values."""
+    if value is None:
         return default
-    return float(value) if value else default
+    if isinstance(value, (int, float)) and value <= 0:
+        return default
+    return float(value)
 
 
 # MCP Tools
-    return ib
-
 
 @mcp.tool()
 async def get_account_summary() -> AccountSummary:

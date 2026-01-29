@@ -7,15 +7,23 @@ A Model Context Protocol server that provides IBKR trading capabilities.
 import os
 import asyncio
 import logging
-from typing import List, Optional
+from typing import List, Optional, Callable
+from enum import Enum
 
 from pydantic import BaseModel, Field
-from ib_async import IB, Stock, LimitOrder, MarketOrder, StopOrder
+from ib_async import IB, Stock, LimitOrder, MarketOrder, StopOrder, Order, Contract
 from fastmcp import FastMCP
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Constants
+DEFAULT_CURRENCY = "USD"
+DEFAULT_EXCHANGE = "SMART"
+CONNECTION_TIMEOUT = 20
+MARKET_DATA_TIMEOUT = 10
+ORDER_SUBMIT_DELAY = 1
 
 # IBKR connection settings from environment
 IBKR_HOST = os.getenv("IBKR_HOST", "127.0.0.1")
@@ -133,7 +141,8 @@ class CancelResult(BaseModel):
     message: str
 
 
-async def ensure_connected():
+# Helper functions
+async def ensure_connected() -> IB:
     """Ensure IB connection is active."""
     global ib
     
@@ -144,12 +153,73 @@ async def ensure_connected():
         if not ib.isConnected():
             try:
                 logger.info(f"Connecting to IB Gateway at {IBKR_HOST}:{IBKR_PORT}")
-                await ib.connectAsync(IBKR_HOST, IBKR_PORT, clientId=IBKR_CLIENT_ID, timeout=20)
+                await ib.connectAsync(IBKR_HOST, IBKR_PORT, clientId=IBKR_CLIENT_ID, timeout=CONNECTION_TIMEOUT)
                 logger.info(f"Connected to IB Gateway at {IBKR_HOST}:{IBKR_PORT}")
             except Exception as e:
                 logger.error(f"Failed to connect to IB Gateway: {e}")
                 raise
     
+    return ib
+
+
+async def create_and_qualify_contract(symbol: str, exchange: str = DEFAULT_EXCHANGE) -> Contract:
+    """Create and qualify a stock contract."""
+    ib_conn = await ensure_connected()
+    contract = Stock(symbol, exchange, DEFAULT_CURRENCY)
+    await ib_conn.qualifyContractsAsync(contract)
+    return contract
+
+
+def check_readonly_mode() -> bool:
+    """Check if server is in readonly mode."""
+    return READONLY
+
+
+def create_rejected_order_result(symbol: str, action: str, quantity: float, 
+                                  limit_price: Optional[float] = None,
+                                  stop_price: Optional[float] = None) -> OrderResult:
+    """Create a rejected order result for readonly mode."""
+    return OrderResult(
+        order_id=0,
+        status="REJECTED",
+        symbol=symbol,
+        action=action,
+        quantity=quantity,
+        limit_price=limit_price,
+        stop_price=stop_price
+    )
+
+
+async def place_order_internal(symbol: str, action: str, quantity: float,
+                               order: Order, exchange: str = DEFAULT_EXCHANGE,
+                               limit_price: Optional[float] = None,
+                               stop_price: Optional[float] = None) -> OrderResult:
+    """Internal function to place an order."""
+    ib_conn = await ensure_connected()
+    contract = await create_and_qualify_contract(symbol, exchange)
+    
+    trade = ib_conn.placeOrder(contract, order)
+    await asyncio.sleep(ORDER_SUBMIT_DELAY)  # Wait for order to be submitted
+    
+    return OrderResult(
+        order_id=trade.order.orderId,
+        status=trade.orderStatus.status,
+        symbol=symbol,
+        action=action,
+        quantity=quantity,
+        limit_price=limit_price,
+        stop_price=stop_price
+    )
+
+
+def safe_float(value, default=None) -> Optional[float]:
+    """Safely convert value to float, handling None and invalid values."""
+    if value is None or (isinstance(value, (int, float)) and value <= 0):
+        return default
+    return float(value) if value else default
+
+
+# MCP Tools
     return ib
 
 
@@ -232,7 +302,7 @@ async def get_orders() -> List[OrderInfo]:
 
 
 @mcp.tool()
-async def get_stock_price(symbol: str, exchange: str = "SMART") -> StockPrice:
+async def get_stock_price(symbol: str, exchange: str = DEFAULT_EXCHANGE) -> StockPrice:
     """
     Get real-time stock price
     
@@ -241,29 +311,24 @@ async def get_stock_price(symbol: str, exchange: str = "SMART") -> StockPrice:
         exchange: Exchange (default: SMART)
     """
     ib_conn = await ensure_connected()
-    
-    contract = Stock(symbol, exchange, 'USD')
-    await ib_conn.qualifyContractsAsync(contract)
+    contract = await create_and_qualify_contract(symbol, exchange)
 
     # 1 = Live, 2 = Frozen, 3 = Delayed, 4 = Delayed Frozen
     ib_conn.reqMarketDataType(2)
 
-
     ticker = ib_conn.reqMktData(contract, '', snapshot=True, regulatorySnapshot=False)
     
-    # Create a future to wait for ticker update
+    # Wait for ticker update
     update_event = asyncio.Event()
     
     def on_ticker_update(ticker):
-        # Check if we have valid data
         if ticker.last or ticker.close or ticker.bid or ticker.ask:
             update_event.set()
     
     ticker.updateEvent += on_ticker_update
     
     try:
-        # Wait for update with timeout
-        await asyncio.wait_for(update_event.wait(), timeout=10)
+        await asyncio.wait_for(update_event.wait(), timeout=MARKET_DATA_TIMEOUT)
     except asyncio.TimeoutError:
         logger.warning(f"Timeout waiting for market data for {symbol}")
     finally:
@@ -272,11 +337,11 @@ async def get_stock_price(symbol: str, exchange: str = "SMART") -> StockPrice:
     
     return StockPrice(
         symbol=symbol,
-        bid=ticker.bid if ticker.bid and ticker.bid > 0 else None,
-        ask=ticker.ask if ticker.ask and ticker.ask > 0 else None,
-        last=ticker.last if ticker.last and ticker.last > 0 else None,
-        close=ticker.close if ticker.close and ticker.close > 0 else None,
-        volume=ticker.volume if ticker.volume and ticker.volume > 0 else None,
+        bid=safe_float(ticker.bid),
+        ask=safe_float(ticker.ask),
+        last=safe_float(ticker.last),
+        close=safe_float(ticker.close),
+        volume=safe_float(ticker.volume),
         timestamp=str(ticker.time) if ticker.time else None
     )
 
@@ -286,7 +351,7 @@ async def get_historical_data(
     symbol: str, 
     duration: str = "1 D",
     bar_size: str = "1 hour",
-    exchange: str = "SMART"
+    exchange: str = DEFAULT_EXCHANGE
 ) -> List[HistoricalBar]:
     """
     Get historical stock data
@@ -298,9 +363,7 @@ async def get_historical_data(
         exchange: Exchange (default: SMART)
     """
     ib_conn = await ensure_connected()
-    
-    contract = Stock(symbol, exchange, 'USD')
-    await ib_conn.qualifyContractsAsync(contract)
+    contract = await create_and_qualify_contract(symbol, exchange)
     
     try:
         bars = await ib_conn.reqHistoricalDataAsync(
@@ -315,22 +378,21 @@ async def get_historical_data(
         logger.error(f"Error fetching historical data for {symbol}: {e}")
         raise ValueError(f"Failed to fetch historical data for {symbol}: {str(e)}")
     
-    result = []
-    for bar in bars:
-        result.append(HistoricalBar(
+    return [
+        HistoricalBar(
             date=str(bar.date),
             open=bar.open,
             high=bar.high,
             low=bar.low,
             close=bar.close,
             volume=bar.volume
-        ))
-    
-    return result
+        )
+        for bar in bars
+    ]
 
 
 @mcp.tool()
-async def get_option_chain(symbol: str, exchange: str = "SMART") -> List[OptionChain]:
+async def get_option_chain(symbol: str, exchange: str = DEFAULT_EXCHANGE) -> List[OptionChain]:
     """
     Get option chain for a stock
     
@@ -339,25 +401,21 @@ async def get_option_chain(symbol: str, exchange: str = "SMART") -> List[OptionC
         exchange: Exchange (default: SMART)
     """
     ib_conn = await ensure_connected()
-    
-    contract = Stock(symbol, exchange, 'USD')
-    await ib_conn.qualifyContractsAsync(contract)
+    contract = await create_and_qualify_contract(symbol, exchange)
     
     chains = await ib_conn.reqSecDefOptParamsAsync(
         contract.symbol, '', contract.secType, contract.conId
     )
     
-    result = []
-    if chains:
-        for chain in chains:
-            result.append(OptionChain(
-                exchange=chain.exchange,
-                strikes=sorted(list(chain.strikes)),
-                expirations=sorted([str(exp) for exp in chain.expirations]),
-                multiplier=str(chain.multiplier)
-            ))
-    
-    return result
+    return [
+        OptionChain(
+            exchange=chain.exchange,
+            strikes=sorted(list(chain.strikes)),
+            expirations=sorted([str(exp) for exp in chain.expirations]),
+            multiplier=str(chain.multiplier)
+        )
+        for chain in (chains or [])
+    ]
 
 
 @mcp.tool()
@@ -366,7 +424,7 @@ async def place_limit_order(
     action: str,
     quantity: float,
     limit_price: float,
-    exchange: str = "SMART"
+    exchange: str = DEFAULT_EXCHANGE
 ) -> OrderResult:
     """
     Place a limit order
@@ -380,34 +438,11 @@ async def place_limit_order(
     
     Note: This tool is disabled when READONLY mode is enabled
     """
-    if READONLY:
-        return OrderResult(
-            order_id=0,
-            status="REJECTED",
-            symbol=symbol,
-            action=action,
-            quantity=quantity,
-            limit_price=limit_price
-        )
-    
-    ib_conn = await ensure_connected()
-    
-    contract = Stock(symbol, exchange, 'USD')
-    await ib_conn.qualifyContractsAsync(contract)
+    if check_readonly_mode():
+        return create_rejected_order_result(symbol, action, quantity, limit_price=limit_price)
     
     order = LimitOrder(action, quantity, limit_price)
-    trade = ib_conn.placeOrder(contract, order)
-    
-    await asyncio.sleep(1)  # Wait for order to be submitted
-    
-    return OrderResult(
-        order_id=trade.order.orderId,
-        status=trade.orderStatus.status,
-        symbol=symbol,
-        action=action,
-        quantity=quantity,
-        limit_price=limit_price
-    )
+    return await place_order_internal(symbol, action, quantity, order, exchange, limit_price=limit_price)
 
 
 @mcp.tool()
@@ -415,7 +450,7 @@ async def place_market_order(
     symbol: str,
     action: str,
     quantity: float,
-    exchange: str = "SMART"
+    exchange: str = DEFAULT_EXCHANGE
 ) -> OrderResult:
     """
     Place a market order
@@ -428,32 +463,11 @@ async def place_market_order(
     
     Note: This tool is disabled when READONLY mode is enabled
     """
-    if READONLY:
-        return OrderResult(
-            order_id=0,
-            status="REJECTED",
-            symbol=symbol,
-            action=action,
-            quantity=quantity
-        )
-    
-    ib_conn = await ensure_connected()
-    
-    contract = Stock(symbol, exchange, 'USD')
-    await ib_conn.qualifyContractsAsync(contract)
+    if check_readonly_mode():
+        return create_rejected_order_result(symbol, action, quantity)
     
     order = MarketOrder(action, quantity)
-    trade = ib_conn.placeOrder(contract, order)
-    
-    await asyncio.sleep(1)
-    
-    return OrderResult(
-        order_id=trade.order.orderId,
-        status=trade.orderStatus.status,
-        symbol=symbol,
-        action=action,
-        quantity=quantity
-    )
+    return await place_order_internal(symbol, action, quantity, order, exchange)
 
 
 @mcp.tool()
@@ -462,7 +476,7 @@ async def place_stop_order(
     action: str,
     quantity: float,
     stop_price: float,
-    exchange: str = "SMART"
+    exchange: str = DEFAULT_EXCHANGE
 ) -> OrderResult:
     """
     Place a stop (stop-loss) order
@@ -476,34 +490,11 @@ async def place_stop_order(
     
     Note: This tool is disabled when READONLY mode is enabled
     """
-    if READONLY:
-        return OrderResult(
-            order_id=0,
-            status="REJECTED",
-            symbol=symbol,
-            action=action,
-            quantity=quantity,
-            stop_price=stop_price
-        )
-    
-    ib_conn = await ensure_connected()
-    
-    contract = Stock(symbol, exchange, 'USD')
-    await ib_conn.qualifyContractsAsync(contract)
+    if check_readonly_mode():
+        return create_rejected_order_result(symbol, action, quantity, stop_price=stop_price)
     
     order = StopOrder(action, quantity, stop_price)
-    trade = ib_conn.placeOrder(contract, order)
-    
-    await asyncio.sleep(1)
-    
-    return OrderResult(
-        order_id=trade.order.orderId,
-        status=trade.orderStatus.status,
-        symbol=symbol,
-        action=action,
-        quantity=quantity,
-        stop_price=stop_price
-    )
+    return await place_order_internal(symbol, action, quantity, order, exchange, stop_price=stop_price)
 
 
 @mcp.tool()
@@ -516,7 +507,7 @@ async def cancel_order(order_id: int) -> CancelResult:
     
     Note: This tool is disabled when READONLY mode is enabled
     """
-    if READONLY:
+    if check_readonly_mode():
         return CancelResult(
             order_id=order_id,
             status="REJECTED",
@@ -526,13 +517,7 @@ async def cancel_order(order_id: int) -> CancelResult:
     ib_conn = await ensure_connected()
     
     # Find the trade with this order_id
-    trades = ib_conn.trades()
-    target_trade = None
-    
-    for trade in trades:
-        if trade.order.orderId == order_id:
-            target_trade = trade
-            break
+    target_trade = next((t for t in ib_conn.trades() if t.order.orderId == order_id), None)
     
     if target_trade is None:
         return CancelResult(
@@ -543,7 +528,7 @@ async def cancel_order(order_id: int) -> CancelResult:
     
     # Cancel the order
     ib_conn.cancelOrder(target_trade.order)
-    await asyncio.sleep(1)  # Wait for cancellation to process
+    await asyncio.sleep(ORDER_SUBMIT_DELAY)  # Wait for cancellation to process
     
     # Check the updated status
     updated_status = target_trade.orderStatus.status

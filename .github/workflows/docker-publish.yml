@@ -96,6 +96,8 @@ jobs:
               ? `## Changes since ${previousTag}\n\n${changelog}`
               : `## Changes\n\n${changelog}`;
             
+            const isPrerelease = context.payload.release.prerelease;
+            
             const usageInstructions = `
             ## Docker Image Usage
 
@@ -103,10 +105,8 @@ jobs:
 
             \`\`\`bash
             docker pull ${registry}/${imageName}:${currentTag}
-            # Or use latest
-            docker pull ${registry}/${imageName}:latest
             \`\`\`
-
+            ${!isPrerelease ? '\nFor stable releases, you can also use the `latest` tag:\n\n```bash\ndocker pull ' + registry + '/' + imageName + ':latest\n```\n' : '\n> **Note**: This is a prerelease version. For production use, consider using a stable release with the `latest` tag.\n'}
             ### Run with Docker Compose
 
             Update your \`docker-compose.yml\` to use this image:

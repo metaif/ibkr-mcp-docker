@@ -43,7 +43,7 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
-            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=latest,enable=${{ github.event.release.prerelease == false }}
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
@@ -82,11 +82,15 @@ jobs:
 
       - name: Update release notes
         uses: actions/github-script@v7
+        env:
+          CHANGELOG_TEXT: ${{ steps.changelog.outputs.changelog }}
         with:
           script: |
-            const changelog = `${{ steps.changelog.outputs.changelog }}`;
+            const changelog = process.env.CHANGELOG_TEXT;
             const currentTag = '${{ steps.previoustag.outputs.current_tag }}';
             const previousTag = '${{ steps.previoustag.outputs.previous_tag }}';
+            const registry = '${{ env.REGISTRY }}';
+            const imageName = '${{ env.IMAGE_NAME }}';
             
             const changelogSection = previousTag 
               ? `## Changes since ${previousTag}\n\n${changelog}`
@@ -98,9 +102,9 @@ jobs:
             ### Pull the image
 
             \`\`\`bash
-            docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${currentTag}
+            docker pull ${registry}/${imageName}:${currentTag}
             # Or use latest
-            docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+            docker pull ${registry}/${imageName}:latest
             \`\`\`
 
             ### Run with Docker Compose
@@ -108,10 +112,9 @@ jobs:
             Update your \`docker-compose.yml\` to use this image:
 
             \`\`\`yaml
-            version: '3.8'
             services:
               mcp-server:
-                image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${currentTag}
+                image: ${registry}/${imageName}:${currentTag}
                 ports:
                   - "8080:8080"
                 environment:
@@ -147,7 +150,7 @@ jobs:
               -e IBKR_GATEWAY_PORT=4002 \\
               -e SERVER_PORT=8080 \\
               -e READONLY=false \\
-              ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${currentTag}
+              ${registry}/${imageName}:${currentTag}
             \`\`\`
 
             ### Access the MCP Server
@@ -160,18 +163,22 @@ jobs:
             For more information, see the [README](https://github.com/${{ github.repository }}/blob/main/README.md).
             `;
 
-            const release = await github.rest.repos.getReleaseByTag({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              tag: currentTag
-            });
+            try {
+              const release = await github.rest.repos.getReleaseByTag({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                tag: currentTag
+              });
 
-            const currentBody = release.data.body || '';
-            const updatedBody = `${currentBody}\n\n${changelogSection}\n\n${usageInstructions}`;
+              const currentBody = release.data.body || '';
+              const updatedBody = `${currentBody}\n\n${changelogSection}\n\n${usageInstructions}`;
 
-            await github.rest.repos.updateRelease({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              release_id: release.data.id,
-              body: updatedBody
-            });
+              await github.rest.repos.updateRelease({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                release_id: release.data.id,
+                body: updatedBody
+              });
+            } catch (error) {
+              core.setFailed(`Failed to update release: ${error.message}`);
+            }

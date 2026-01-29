@@ -1,0 +1,177 @@
+name: Docker Build and Publish
+
+on:
+  release:
+    types: [published]
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata (tags, labels) for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Get previous tag
+        id: previoustag
+        run: |
+          CURRENT_TAG="${{ github.ref_name }}"
+          PREVIOUS_TAG=$(git tag --sort=-version:refname | grep -v "^${CURRENT_TAG}$" | head -n 1)
+          echo "previous_tag=${PREVIOUS_TAG}" >> $GITHUB_OUTPUT
+          echo "current_tag=${CURRENT_TAG}" >> $GITHUB_OUTPUT
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          CURRENT_TAG="${{ steps.previoustag.outputs.current_tag }}"
+          PREVIOUS_TAG="${{ steps.previoustag.outputs.previous_tag }}"
+          
+          if [ -z "$PREVIOUS_TAG" ]; then
+            CHANGELOG="Initial release"
+          else
+            CHANGELOG=$(git log --pretty=format:"- %s (%h)" ${PREVIOUS_TAG}..${CURRENT_TAG})
+          fi
+          
+          echo "changelog<<EOF" >> $GITHUB_OUTPUT
+          echo "$CHANGELOG" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Update release notes
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const changelog = `${{ steps.changelog.outputs.changelog }}`;
+            const currentTag = '${{ steps.previoustag.outputs.current_tag }}';
+            const previousTag = '${{ steps.previoustag.outputs.previous_tag }}';
+            
+            const changelogSection = previousTag 
+              ? `## Changes since ${previousTag}\n\n${changelog}`
+              : `## Changes\n\n${changelog}`;
+            
+            const usageInstructions = `
+            ## Docker Image Usage
+
+            ### Pull the image
+
+            \`\`\`bash
+            docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${currentTag}
+            # Or use latest
+            docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+            \`\`\`
+
+            ### Run with Docker Compose
+
+            Update your \`docker-compose.yml\` to use this image:
+
+            \`\`\`yaml
+            version: '3.8'
+            services:
+              mcp-server:
+                image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${currentTag}
+                ports:
+                  - "8080:8080"
+                environment:
+                  - IBKR_GATEWAY_PORT=4002
+                  - SERVER_PORT=8080
+                  - READONLY=false
+                depends_on:
+                  - ib-gateway
+              
+              ib-gateway:
+                image: ghcr.io/gnzsnz/ib-gateway:latest
+                environment:
+                  - IBKR_USERID=\${IBKR_USERID}
+                  - IBKR_PASSWORD=\${IBKR_PASSWORD}
+                  - IBKR_TRADING_MODE=paper
+                ports:
+                  - "4002:4002"
+                  - "5900:5900"
+            \`\`\`
+
+            Then run:
+
+            \`\`\`bash
+            docker-compose up -d
+            \`\`\`
+
+            ### Run standalone
+
+            \`\`\`bash
+            docker run -d \\
+              --name ibkr-mcp-server \\
+              -p 8080:8080 \\
+              -e IBKR_GATEWAY_PORT=4002 \\
+              -e SERVER_PORT=8080 \\
+              -e READONLY=false \\
+              ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${currentTag}
+            \`\`\`
+
+            ### Access the MCP Server
+
+            The MCP server will be available at:
+            \`\`\`
+            http://localhost:8080/mcp
+            \`\`\`
+
+            For more information, see the [README](https://github.com/${{ github.repository }}/blob/main/README.md).
+            `;
+
+            const release = await github.rest.repos.getReleaseByTag({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag: currentTag
+            });
+
+            const currentBody = release.data.body || '';
+            const updatedBody = `${currentBody}\n\n${changelogSection}\n\n${usageInstructions}`;
+
+            await github.rest.repos.updateRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              release_id: release.data.id,
+              body: updatedBody
+            });

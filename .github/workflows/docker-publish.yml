@@ -3,6 +3,12 @@ name: Docker Build and Publish
 on:
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag version to build (e.g., v1.0.0)'
+        required: true
+        type: string
 
 env:
   REGISTRY: ghcr.io
@@ -40,10 +46,10 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}}
-            type=raw,value=latest,enable=${{ github.event.release.prerelease == false }}
+            type=semver,pattern={{version}},value=${{ github.event.inputs.tag || github.ref_name }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ github.event.inputs.tag || github.ref_name }}
+            type=semver,pattern={{major}},value=${{ github.event.inputs.tag || github.ref_name }}
+            type=raw,value=latest,enable=${{ github.event_name == 'release' && github.event.release.prerelease == false }}
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
@@ -59,7 +65,11 @@ jobs:
       - name: Get previous tag
         id: previoustag
         run: |
-          CURRENT_TAG="${{ github.ref_name }}"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            CURRENT_TAG="${{ github.event.inputs.tag }}"
+          else
+            CURRENT_TAG="${{ github.ref_name }}"
+          fi
           PREVIOUS_TAG=$(git tag --sort=-version:refname | grep -v "^${CURRENT_TAG}$" | head -n 1)
           echo "previous_tag=${PREVIOUS_TAG}" >> $GITHUB_OUTPUT
           echo "current_tag=${CURRENT_TAG}" >> $GITHUB_OUTPUT
@@ -81,6 +91,7 @@ jobs:
           echo "EOF" >> $GITHUB_OUTPUT
 
       - name: Update release notes
+        if: github.event_name == 'release'
         uses: actions/github-script@v7
         env:
           CHANGELOG_TEXT: ${{ steps.changelog.outputs.changelog }}

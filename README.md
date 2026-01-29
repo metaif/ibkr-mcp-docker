@@ -94,18 +94,7 @@ cp .env.example .env
 
 2. Edit the `.env` file with your IBKR credentials (see [Configuration](#configuration) section below)
 
-3. Update `docker-compose.yml` to use the pre-built image:
-   
-   Replace the `build: .` line with the pre-built image reference:
-
-```yaml
-services:
-  mcp-server:
-    image: ghcr.io/metaif/ibkr-mcp-docker:latest
-    # ... rest of your configuration remains the same
-```
-
-4. Start the services:
+3. Start the services:
 ```bash
 docker-compose up -d
 ```
@@ -141,6 +130,22 @@ READONLY=false  # Set to 'true' to disable order operations
 
 # Optional: VNC password for monitoring the gateway
 VNC_PASSWORD=your_vnc_password
+```
+
+4. Update `docker-compose.yml` to build from source:
+
+   Replace the image line with build configuration:
+
+```yaml
+services:
+  mcp-server:
+    build: .
+    # Remove or comment out: image: ghcr.io/metaif/ibkr-mcp-docker:latest
+```
+
+5. Build and start the services:
+```bash
+docker-compose up -d --build
 ```
 
 ## Configuration

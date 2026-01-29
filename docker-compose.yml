@@ -25,7 +25,7 @@ services:
       - ibkr-network
 
   mcp-server:
-    build: .
+    image: ghcr.io/metaif/ibkr-mcp-docker:latest
     container_name: ibkr-mcp-server
     restart: unless-stopped
     depends_on:

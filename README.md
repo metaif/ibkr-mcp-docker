@@ -115,12 +115,14 @@ cp .env.example .env
 2. Edit the `.env` file with your IBKR credentials (see [Configuration](#configuration) section below)
 
 3. Update `docker-compose.yml` to use the pre-built image:
+   
+   Replace the `build: .` line with the pre-built image reference:
+
 ```yaml
 services:
   mcp-server:
-    image: ghcr.io/metaif/ibkr-mcp-docker:latest  # Use pre-built image
-    # Remove the 'build: .' line
-    ...
+    image: ghcr.io/metaif/ibkr-mcp-docker:latest
+    # ... rest of your configuration remains the same
 ```
 
 4. Start the services:
@@ -308,11 +310,7 @@ MCP 服务器提供以下工具。每个工具都使用 Pydantic 模型返回类
 5. **`get_historical_data`** → `List[HistoricalBar]`
    - Get historical stock data
    - 获取历史股票数据
-   - Parameters: 
-     - `symbol` (required)
-     - `duration` (default: "1 D", e.g., "1 D", "1 W", "1 M")
-     - `bar_size` (default: "1 hour", e.g., "1 min", "1 hour", "1 day")
-     - `exchange` (optional)
+   - Parameters: `symbol` (required), `duration` (default: "1 D"), `bar_size` (default: "1 hour"), `exchange` (optional)
    - Returns: OHLCV data for each bar (`date`, `open`, `high`, `low`, `close`, `volume`)
    - **May require market data subscription depending on the data requested / 根据请求的数据可能需要行情订阅**
 

@@ -351,18 +351,6 @@ docker-compose down -v
 
 ## Development
 
-### Building Locally
-
-To build the Docker image locally instead of using the pre-built image:
-
-```bash
-# Build the image
-docker-compose build
-
-# Or build without cache
-docker-compose build --no-cache
-```
-
 ### Running Tests
 
 The server uses standard Python testing. To run tests:

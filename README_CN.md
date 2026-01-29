@@ -351,18 +351,6 @@ docker-compose down -v
 
 ## 开发
 
-### 本地构建
-
-如果要在本地构建 Docker 镜像而不是使用预构建镜像：
-
-```bash
-# 构建镜像
-docker-compose build
-
-# 或不使用缓存构建
-docker-compose build --no-cache
-```
-
 ### 运行测试
 
 服务器使用标准 Python 测试。运行测试：

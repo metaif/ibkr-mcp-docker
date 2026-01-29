@@ -94,18 +94,7 @@ cp .env.example .env
 
 2. 编辑 `.env` 文件，填入您的 IBKR 凭证（参见下面的[配置](#配置)部分）
 
-3. 更新 `docker-compose.yml` 使用预构建镜像：
-   
-   将 `build: .` 行替换为预构建镜像引用：
-
-```yaml
-services:
-  mcp-server:
-    image: ghcr.io/metaif/ibkr-mcp-docker:latest
-    # ... 其余配置保持不变
-```
-
-4. 启动服务：
+3. 启动服务：
 ```bash
 docker-compose up -d
 ```
@@ -141,6 +130,22 @@ READONLY=false  # 设置为 'true' 禁用订单操作
 
 # 可选：用于监控网关的 VNC 密码
 VNC_PASSWORD=your_vnc_password
+```
+
+4. 更新 `docker-compose.yml` 从源码构建：
+
+   将镜像行替换为构建配置：
+
+```yaml
+services:
+  mcp-server:
+    build: .
+    # 删除或注释掉：image: ghcr.io/metaif/ibkr-mcp-docker:latest
+```
+
+5. 构建并启动服务：
+```bash
+docker-compose up -d --build
 ```
 
 ## 配置

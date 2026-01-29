@@ -349,16 +349,6 @@ docker-compose down
 docker-compose down -v
 ```
 
-## 开发
-
-### 运行测试
-
-服务器使用标准 Python 测试。运行测试：
-
-```bash
-docker-compose exec mcp-server python -m pytest tests/
-```
-
 ## 配置参考
 
 ### 完整环境变量参考

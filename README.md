@@ -349,16 +349,6 @@ To also remove volumes:
 docker-compose down -v
 ```
 
-## Development
-
-### Running Tests
-
-The server uses standard Python testing. To run tests:
-
-```bash
-docker-compose exec mcp-server python -m pytest tests/
-```
-
 ## Configuration Reference
 
 ### Complete Environment Variables Reference

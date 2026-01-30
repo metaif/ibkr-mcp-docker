@@ -313,10 +313,39 @@ async def get_positions() -> List[Position]:
     # Create a map of (account, conId) -> pnlSingle for easy lookup
     pnl_map = {(p.account, p.conId): p for p in pnl_singles}
     
-    return [
-        extract_position_data(pos, pnl_map.get((pos.account, pos.contract.conId)))
-        for pos in positions
-    ]
+    result = []
+    for pos in positions:
+        # Get matching pnl data
+        pnl = pnl_map.get((pos.account, pos.contract.conId))
+        
+        # Calculate values
+        market_price = 0.0
+        market_value = 0.0
+        unrealized_pnl = 0.0
+        realized_pnl = 0.0
+        
+        if pnl:
+            market_value = pnl.value if hasattr(pnl, 'value') else 0.0
+            unrealized_pnl = pnl.unrealizedPnL if hasattr(pnl, 'unrealizedPnL') else 0.0
+            realized_pnl = pnl.realizedPnL if hasattr(pnl, 'realizedPnL') else 0.0
+            # Calculate market price from value and position
+            if pos.position != 0:
+                market_price = market_value / pos.position
+        
+        result.append(Position(
+            account=pos.account,
+            symbol=pos.contract.symbol,
+            sec_type=pos.contract.secType,
+            exchange=pos.contract.primaryExchange or pos.contract.exchange,
+            position=pos.position,
+            avg_cost=pos.avgCost,
+            market_price=market_price,
+            market_value=market_value,
+            unrealized_pnl=unrealized_pnl,
+            realized_pnl=realized_pnl
+        ))
+    
+    return result
 
 
 @mcp.tool()
@@ -588,15 +617,15 @@ if __name__ == "__main__":
     )
     
     def start_auto_connect():
-        """Start auto-connect in a new event loop."""
+        """Start auto-connect in a new event loop in background thread."""
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        try:
-            loop.run_until_complete(auto_connect_ibkr())
-        finally:
-            loop.close()
+        loop.run_until_complete(auto_connect_ibkr())
+        loop.close()
     
-    threading.Thread(target=start_auto_connect, daemon=True).start()
+    # Start auto-connect in background thread
+    connect_thread = threading.Thread(target=start_auto_connect, daemon=True)
+    connect_thread.start()
     
-    # Run the MCP server
+    # Run the MCP server (this will block)
     mcp.run(transport="http", host="0.0.0.0", port=SERVER_PORT)

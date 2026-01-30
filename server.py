@@ -7,6 +7,7 @@ A Model Context Protocol server that provides IBKR trading capabilities.
 import os
 import asyncio
 import logging
+import threading
 from typing import List, Optional, Callable
 from functools import wraps
 
@@ -248,6 +249,27 @@ async def auto_connect_ibkr():
             await asyncio.sleep(AUTO_CONNECT_RETRY_INTERVAL)
 
 
+def extract_position_data(pos, pnl):
+    """Extract position data from position and PnL objects."""
+    market_value = getattr(pnl, 'value', 0.0) if pnl else 0.0
+    unrealized_pnl = getattr(pnl, 'unrealizedPnL', 0.0) if pnl else 0.0
+    realized_pnl = getattr(pnl, 'realizedPnL', 0.0) if pnl else 0.0
+    market_price = market_value / pos.position if pnl and pos.position != 0 else 0.0
+    
+    return Position(
+        account=pos.account,
+        symbol=pos.contract.symbol,
+        sec_type=pos.contract.secType,
+        exchange=pos.contract.primaryExchange or pos.contract.exchange,
+        position=pos.position,
+        avg_cost=pos.avgCost,
+        market_price=market_price,
+        market_value=market_value,
+        unrealized_pnl=unrealized_pnl,
+        realized_pnl=realized_pnl
+    )
+
+
 # MCP Tools
 
 @mcp.tool()
@@ -290,26 +312,6 @@ async def get_positions() -> List[Position]:
     
     # Create a map of (account, conId) -> pnlSingle for easy lookup
     pnl_map = {(p.account, p.conId): p for p in pnl_singles}
-    
-    def extract_position_data(pos, pnl):
-        """Extract position data from position and PnL objects."""
-        market_value = getattr(pnl, 'value', 0.0) if pnl else 0.0
-        unrealized_pnl = getattr(pnl, 'unrealizedPnL', 0.0) if pnl else 0.0
-        realized_pnl = getattr(pnl, 'realizedPnL', 0.0) if pnl else 0.0
-        market_price = market_value / pos.position if pnl and pos.position != 0 else 0.0
-        
-        return Position(
-            account=pos.account,
-            symbol=pos.contract.symbol,
-            sec_type=pos.contract.secType,
-            exchange=pos.contract.primaryExchange or pos.contract.exchange,
-            position=pos.position,
-            avg_cost=pos.avgCost,
-            market_price=market_price,
-            market_value=market_value,
-            unrealized_pnl=unrealized_pnl,
-            realized_pnl=realized_pnl
-        )
     
     return [
         extract_position_data(pos, pnl_map.get((pos.account, pos.contract.conId)))
@@ -585,14 +587,14 @@ if __name__ == "__main__":
         f"Starting IBKR MCP Server in {'READONLY' if READONLY else 'READ/WRITE'} mode"
     )
     
-    # Start auto-connect in background
-    import threading
-    
     def start_auto_connect():
         """Start auto-connect in a new event loop."""
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        loop.run_until_complete(auto_connect_ibkr())
+        try:
+            loop.run_until_complete(auto_connect_ibkr())
+        finally:
+            loop.close()
     
     threading.Thread(target=start_auto_connect, daemon=True).start()
     

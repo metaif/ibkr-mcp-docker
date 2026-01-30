@@ -286,19 +286,21 @@ async def get_positions() -> List[Position]:
         # Get matching pnl data
         pnl = pnl_map.get((pos.account, pos.contract.conId))
         
-        # Calculate values
-        market_price = 0.0
-        market_value = 0.0
-        unrealized_pnl = 0.0
-        realized_pnl = 0.0
+        # Initialize values from portfolio / position data to preserve previous behavior
+        market_price = getattr(pos, "marketPrice", 0.0)
+        market_value = getattr(pos, "marketValue", 0.0)
+        unrealized_pnl = getattr(pos, "unrealizedPNL", 0.0)
+        realized_pnl = getattr(pos, "realizedPNL", 0.0)
         
+        # Override with per-position PnL data when available
         if pnl:
-            market_value = pnl.value if hasattr(pnl, 'value') else 0.0
-            unrealized_pnl = pnl.unrealizedPnL if hasattr(pnl, 'unrealizedPnL') else 0.0
-            realized_pnl = pnl.realizedPnL if hasattr(pnl, 'realizedPnL') else 0.0
-            # Calculate market price from value and position
-            if pos.position != 0:
-                market_price = market_value / pos.position
+            market_value = pnl.value if hasattr(pnl, "value") else market_value
+            unrealized_pnl = pnl.unrealizedPnL if hasattr(pnl, "unrealizedPnL") else unrealized_pnl
+            realized_pnl = pnl.realizedPnL if hasattr(pnl, "realizedPnL") else realized_pnl
+        
+        # Calculate market price from value and position if not provided directly
+        if (not market_price) and pos.position:
+            market_price = market_value / pos.position
         
         result.append(Position(
             account=pos.account,
@@ -585,16 +587,5 @@ async def cancel_order(order_id: int) -> CancelResult:
 if __name__ == "__main__":
     logger.info(f"Starting IBKR MCP Server in {'READONLY' if READONLY else 'READ/WRITE'} mode")
     
-    def start_auto_connect():
-        """Start auto-connect in a new event loop in background thread."""
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(auto_connect_ibkr())
-        loop.close()
-    
-    # Start auto-connect in background thread
-    connect_thread = threading.Thread(target=start_auto_connect, daemon=True)
-    connect_thread.start()
-    
-    # Run the MCP server (this will block)
+    # Run the MCP server (this will block and manage its own event loop)
     mcp.run(transport="http", host="0.0.0.0", port=SERVER_PORT)

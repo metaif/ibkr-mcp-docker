@@ -250,12 +250,24 @@ async def auto_connect_ibkr():
 
 
 def extract_position_data(pos, pnl):
-    """Extract position data from position and PnL objects."""
-    market_value = getattr(pnl, 'value', 0.0) if pnl else 0.0
-    unrealized_pnl = getattr(pnl, 'unrealizedPnL', 0.0) if pnl else 0.0
-    realized_pnl = getattr(pnl, 'realizedPnL', 0.0) if pnl else 0.0
-    market_price = market_value / pos.position if pnl and pos.position != 0 else 0.0
-    
+    """Extract position data from position and PnL objects.
+
+    Prefer IB position-derived market fields and override them with PnL values
+    when available, to avoid zeroing out values when no PnL record exists.
+    """
+    # Start with values derived from the IB position object, if available
+    market_value = getattr(pos, 'marketValue', 0.0)
+    unrealized_pnl = getattr(pos, 'unrealizedPNL', 0.0)
+    realized_pnl = getattr(pos, 'realizedPNL', 0.0)
+    market_price = getattr(pos, 'marketPrice', 0.0)
+
+    # Override with PnL data when present
+    if pnl:
+        market_value = getattr(pnl, 'value', market_value)
+        unrealized_pnl = getattr(pnl, 'unrealizedPnL', unrealized_pnl)
+        realized_pnl = getattr(pnl, 'realizedPnL', realized_pnl)
+        if pos.position != 0:
+            market_price = market_value / pos.position
     return Position(
         account=pos.account,
         symbol=pos.contract.symbol,
@@ -616,16 +628,9 @@ if __name__ == "__main__":
         f"Starting IBKR MCP Server in {'READONLY' if READONLY else 'READ/WRITE'} mode"
     )
     
-    def start_auto_connect():
-        """Start auto-connect in a new event loop in background thread."""
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(auto_connect_ibkr())
-        loop.close()
-    
-    # Start auto-connect in background thread
-    connect_thread = threading.Thread(target=start_auto_connect, daemon=True)
-    connect_thread.start()
+    # Schedule auto-connect to run in the same event loop as the MCP server
+    loop = asyncio.get_event_loop()
+    loop.create_task(auto_connect_ibkr())
     
     # Run the MCP server (this will block)
     mcp.run(transport="http", host="0.0.0.0", port=SERVER_PORT)

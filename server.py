@@ -7,7 +7,9 @@ A Model Context Protocol server that provides IBKR trading capabilities.
 import os
 import asyncio
 import logging
-from typing import List, Optional
+import threading
+from typing import List, Optional, Callable
+from functools import wraps
 
 from pydantic import BaseModel, Field
 from ib_async import IB, Stock, LimitOrder, MarketOrder, StopOrder, Order, Contract
@@ -23,6 +25,7 @@ DEFAULT_EXCHANGE = "SMART"
 CONNECTION_TIMEOUT = 20
 MARKET_DATA_TIMEOUT = 10
 ORDER_SUBMIT_DELAY = 1
+AUTO_CONNECT_RETRY_INTERVAL = 5  # seconds
 
 # IBKR connection settings from environment
 IBKR_HOST = os.getenv("IBKR_HOST", "127.0.0.1")
@@ -169,36 +172,21 @@ async def create_and_qualify_contract(symbol: str, exchange: str = DEFAULT_EXCHA
     return contract
 
 
-def check_readonly_mode() -> bool:
-    """Check if server is in readonly mode."""
-    return READONLY
-
-
-def create_rejected_order_result(symbol: str, action: str, quantity: float, 
-                                  limit_price: Optional[float] = None,
-                                  stop_price: Optional[float] = None) -> OrderResult:
-    """Create a rejected order result for readonly mode."""
-    return OrderResult(
-        order_id=0,
-        status="REJECTED",
-        symbol=symbol,
-        action=action,
-        quantity=quantity,
-        limit_price=limit_price,
-        stop_price=stop_price
-    )
-
-
-async def place_order_internal(symbol: str, action: str, quantity: float,
-                               order: Order, exchange: str = DEFAULT_EXCHANGE,
-                               limit_price: Optional[float] = None,
-                               stop_price: Optional[float] = None) -> OrderResult:
+async def place_order_internal(
+    symbol: str, 
+    action: str, 
+    quantity: float,
+    order: Order, 
+    exchange: str = DEFAULT_EXCHANGE,
+    limit_price: Optional[float] = None,
+    stop_price: Optional[float] = None
+) -> OrderResult:
     """Internal function to place an order."""
     ib_conn = await ensure_connected()
     contract = await create_and_qualify_contract(symbol, exchange)
     
     trade = ib_conn.placeOrder(contract, order)
-    await asyncio.sleep(ORDER_SUBMIT_DELAY)  # Wait for order to be submitted
+    await asyncio.sleep(ORDER_SUBMIT_DELAY)
     
     return OrderResult(
         order_id=trade.order.orderId,
@@ -220,6 +208,80 @@ def safe_float(value, default: Optional[float] = None) -> Optional[float]:
     return float(value)
 
 
+def readonly_protected(func: Callable) -> Callable:
+    """Decorator to protect write operations in readonly mode."""
+    @wraps(func)
+    async def wrapper(*args, **kwargs):
+        if READONLY:
+            # Extract order parameters from args/kwargs
+            symbol = kwargs.get('symbol', args[0] if args else 'unknown')
+            action = kwargs.get('action', args[1] if len(args) > 1 else 'unknown')
+            quantity = kwargs.get('quantity', args[2] if len(args) > 2 else 0)
+            limit_price = kwargs.get('limit_price')
+            stop_price = kwargs.get('stop_price')
+            
+            return OrderResult(
+                order_id=0,
+                status="REJECTED",
+                symbol=symbol,
+                action=action,
+                quantity=quantity,
+                limit_price=limit_price,
+                stop_price=stop_price
+            )
+        return await func(*args, **kwargs)
+    return wrapper
+
+
+async def auto_connect_ibkr():
+    """Automatically connect to IBKR Gateway with retry logic."""
+    while True:
+        try:
+            logger.info("Attempting to connect to IBKR Gateway...")
+            await ensure_connected()
+            logger.info("Successfully connected to IBKR Gateway")
+            break
+        except Exception as e:
+            logger.warning(
+                f"Failed to connect to IBKR Gateway: {e}. "
+                f"Retrying in {AUTO_CONNECT_RETRY_INTERVAL} seconds..."
+            )
+            await asyncio.sleep(AUTO_CONNECT_RETRY_INTERVAL)
+
+
+def extract_position_data(pos, pnl):
+    """Extract position data from position and PnL objects.
+
+    Prefer IB position-derived market fields and override them with PnL values
+    when available, to avoid zeroing out values when no PnL record exists.
+    """
+    # Start with values derived from the IB position object, if available
+    market_value = getattr(pos, 'marketValue', 0.0)
+    unrealized_pnl = getattr(pos, 'unrealizedPNL', 0.0)
+    realized_pnl = getattr(pos, 'realizedPNL', 0.0)
+    market_price = getattr(pos, 'marketPrice', 0.0)
+
+    # Override with PnL data when present
+    if pnl:
+        market_value = getattr(pnl, 'value', market_value)
+        unrealized_pnl = getattr(pnl, 'unrealizedPnL', unrealized_pnl)
+        realized_pnl = getattr(pnl, 'realizedPnL', realized_pnl)
+        if pos.position != 0:
+            market_price = market_value / pos.position
+    return Position(
+        account=pos.account,
+        symbol=pos.contract.symbol,
+        sec_type=pos.contract.secType,
+        exchange=pos.contract.primaryExchange or pos.contract.exchange,
+        position=pos.position,
+        avg_cost=pos.avgCost,
+        market_price=market_price,
+        market_value=market_value,
+        unrealized_pnl=unrealized_pnl,
+        realized_pnl=realized_pnl
+    )
+
+
 # MCP Tools
 
 @mcp.tool()
@@ -227,12 +289,14 @@ async def get_account_summary() -> AccountSummary:
     """Get account summary including cash balance and net liquidation value"""
     ib_conn = await ensure_connected()
     
-    account_values = ib_conn.accountValues()
+    # Use async method to get account summary
+    account_values = await ib_conn.accountSummaryAsync()
+    
+    required_tags = {'NetLiquidation', 'CashBalance', 'TotalCashValue', 'BuyingPower', 'GrossPositionValue'}
     summary_dict = {}
     
     for av in account_values:
-        if av.tag in ['NetLiquidation', 'CashBalance', 'TotalCashValue', 
-                      'BuyingPower', 'GrossPositionValue']:
+        if av.tag in required_tags:
             summary_dict[av.tag] = AccountValue(
                 tag=av.tag,
                 value=av.value,
@@ -254,21 +318,43 @@ async def get_positions() -> List[Position]:
     """Get all current positions in the account"""
     ib_conn = await ensure_connected()
     
-    portfolio_items = ib_conn.portfolio()
-    result = []
+    # Get positions and PnL data
+    positions = ib_conn.positions()
+    pnl_singles = ib_conn.pnlSingle()
     
-    for item in portfolio_items:
+    # Create a map of (account, conId) -> pnlSingle for easy lookup
+    pnl_map = {(p.account, p.conId): p for p in pnl_singles}
+    
+    result = []
+    for pos in positions:
+        # Get matching pnl data
+        pnl = pnl_map.get((pos.account, pos.contract.conId))
+        
+        # Calculate values
+        market_price = 0.0
+        market_value = 0.0
+        unrealized_pnl = 0.0
+        realized_pnl = 0.0
+        
+        if pnl:
+            market_value = pnl.value if hasattr(pnl, 'value') else 0.0
+            unrealized_pnl = pnl.unrealizedPnL if hasattr(pnl, 'unrealizedPnL') else 0.0
+            realized_pnl = pnl.realizedPnL if hasattr(pnl, 'realizedPnL') else 0.0
+            # Calculate market price from value and position
+            if pos.position != 0:
+                market_price = market_value / pos.position
+        
         result.append(Position(
-            account=item.account,
-            symbol=item.contract.symbol,
-            sec_type=item.contract.secType,
-            exchange=item.contract.primaryExchange or item.contract.exchange,
-            position=item.position,
-            avg_cost=item.averageCost,
-            market_price=item.marketPrice if hasattr(item, 'marketPrice') else 0.0,
-            market_value=item.marketValue if hasattr(item, 'marketValue') else 0.0,
-            unrealized_pnl=item.unrealizedPNL if hasattr(item, 'unrealizedPNL') else 0.0,
-            realized_pnl=item.realizedPNL if hasattr(item, 'realizedPNL') else 0.0
+            account=pos.account,
+            symbol=pos.contract.symbol,
+            sec_type=pos.contract.secType,
+            exchange=pos.contract.primaryExchange or pos.contract.exchange,
+            position=pos.position,
+            avg_cost=pos.avgCost,
+            market_price=market_price,
+            market_value=market_value,
+            unrealized_pnl=unrealized_pnl,
+            realized_pnl=realized_pnl
         ))
     
     return result
@@ -279,10 +365,11 @@ async def get_orders() -> List[OrderInfo]:
     """Get all orders (open and filled)"""
     ib_conn = await ensure_connected()
     
-    trades = ib_conn.trades()
-    result = []
+    # Get all trades (includes open and recently filled)
+    all_trades = ib_conn.trades()
     
-    for trade in trades:
+    result = []
+    for trade in all_trades:
         result.append(OrderInfo(
             order_id=trade.order.orderId,
             symbol=trade.contract.symbol,
@@ -418,6 +505,7 @@ async def get_option_chain(symbol: str, exchange: str = DEFAULT_EXCHANGE) -> Lis
 
 
 @mcp.tool()
+@readonly_protected
 async def place_limit_order(
     symbol: str,
     action: str,
@@ -437,14 +525,12 @@ async def place_limit_order(
     
     Note: This tool is disabled when READONLY mode is enabled
     """
-    if check_readonly_mode():
-        return create_rejected_order_result(symbol, action, quantity, limit_price=limit_price)
-    
     order = LimitOrder(action, quantity, limit_price)
     return await place_order_internal(symbol, action, quantity, order, exchange, limit_price=limit_price)
 
 
 @mcp.tool()
+@readonly_protected
 async def place_market_order(
     symbol: str,
     action: str,
@@ -462,14 +548,12 @@ async def place_market_order(
     
     Note: This tool is disabled when READONLY mode is enabled
     """
-    if check_readonly_mode():
-        return create_rejected_order_result(symbol, action, quantity)
-    
     order = MarketOrder(action, quantity)
     return await place_order_internal(symbol, action, quantity, order, exchange)
 
 
 @mcp.tool()
+@readonly_protected
 async def place_stop_order(
     symbol: str,
     action: str,
@@ -489,9 +573,6 @@ async def place_stop_order(
     
     Note: This tool is disabled when READONLY mode is enabled
     """
-    if check_readonly_mode():
-        return create_rejected_order_result(symbol, action, quantity, stop_price=stop_price)
-    
     order = StopOrder(action, quantity, stop_price)
     return await place_order_internal(symbol, action, quantity, order, exchange, stop_price=stop_price)
 
@@ -506,7 +587,7 @@ async def cancel_order(order_id: int) -> CancelResult:
     
     Note: This tool is disabled when READONLY mode is enabled
     """
-    if check_readonly_mode():
+    if READONLY:
         return CancelResult(
             order_id=order_id,
             status="REJECTED",
@@ -516,7 +597,10 @@ async def cancel_order(order_id: int) -> CancelResult:
     ib_conn = await ensure_connected()
     
     # Find the trade with this order_id
-    target_trade = next((t for t in ib_conn.trades() if t.order.orderId == order_id), None)
+    target_trade = next(
+        (t for t in ib_conn.trades() if t.order.orderId == order_id), 
+        None
+    )
     
     if target_trade is None:
         return CancelResult(
@@ -527,7 +611,7 @@ async def cancel_order(order_id: int) -> CancelResult:
     
     # Cancel the order
     ib_conn.cancelOrder(target_trade.order)
-    await asyncio.sleep(ORDER_SUBMIT_DELAY)  # Wait for cancellation to process
+    await asyncio.sleep(ORDER_SUBMIT_DELAY)
     
     # Check the updated status
     updated_status = target_trade.orderStatus.status
@@ -540,5 +624,13 @@ async def cancel_order(order_id: int) -> CancelResult:
 
 
 if __name__ == "__main__":
-    logger.info(f"Starting IBKR MCP Server in {'READONLY' if READONLY else 'READ/WRITE'} mode")
+    logger.info(
+        f"Starting IBKR MCP Server in {'READONLY' if READONLY else 'READ/WRITE'} mode"
+    )
+    
+    # Schedule auto-connect to run in the same event loop as the MCP server
+    loop = asyncio.get_event_loop()
+    loop.create_task(auto_connect_ibkr())
+    
+    # Run the MCP server (this will block)
     mcp.run(transport="http", host="0.0.0.0", port=SERVER_PORT)
